@@ -595,9 +595,13 @@ io.on("connection", socket => {
       g.tricksWon[w]++;
       g.trickCount++;
       addLog(g,`→ ${g.players[w].name} wint slag ${g.trickCount}!`);
-      
-      broadcastGameState(code);
-      
+
+      // Broadcast de tussentijdse staat (kaarten nog zichtbaar op tafel)
+      // Maar alleen als het NIET de laatste slag is — anders tonen we even slag 6/5
+      if(g.trickCount < 5){
+        broadcastGameState(code);
+      }
+
       setTimeout(()=>{
         g.trick = [];
         if(g.trickCount === 5){
