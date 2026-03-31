@@ -85,9 +85,9 @@ function broadcastGameState(room){
   const r = rooms[room];
   if(!r) return;
   r.players.forEach(p => {
+    if(!p.socketId) return; // speler offline, sla over
     const socket = io.sockets.sockets.get(p.socketId);
     if(!socket) return;
-    // Bouw een state object voor deze specifieke speler
     const state = buildStateForPlayer(r, p.playerIndex);
     socket.emit("gameState", state);
   });
@@ -277,12 +277,30 @@ io.on("connection", socket => {
     cb({code, playerIndex:0});
   });
 
-  // ── Kamer vervoegen ──
+  // ── Kamer vervoegen of herverbinden ──
   socket.on("joinRoom", ({code, name}, cb) => {
     const room = rooms[code];
     if(!room){ cb({error:"Kamer niet gevonden"}); return; }
-    if(room.gameState.phase !== "LOBBY"){ cb({error:"Spel al bezig"}); return; }
-    if(room.players.length>=6){ cb({error:"Kamer vol (max 6)"}); return; }
+    if(room.players.length>=6 && room.gameState.phase==="LOBBY"){ cb({error:"Kamer vol (max 6)"}); return; }
+
+    // Controleer of dit een herverbinding is (zelfde naam, spel al bezig)
+    const existingIdx = room.gameState.players.findIndex(p=>p.name===name);
+    if(existingIdx>=0 && room.gameState.phase!=="LOBBY"){
+      // Herverbinding — update socketId
+      room.players[existingIdx].socketId = socket.id;
+      socket.join(code);
+      socket.data.room = code;
+      socket.data.playerIndex = existingIdx;
+      console.log(`${name} herverbonden met kamer ${code} als speler ${existingIdx}`);
+      // Stuur meteen de huidige spelstatus
+      const state = buildStateForPlayer(room, existingIdx);
+      socket.emit("gameState", state);
+      cb({playerIndex: existingIdx, reconnected: true});
+      return;
+    }
+
+    // Nieuwe speler
+    if(room.gameState.phase !== "LOBBY"){ cb({error:"Spel al bezig — gebruik je naam om te herverbinden"}); return; }
 
     const playerIndex = room.players.length;
     room.players.push({name, socketId:socket.id, playerIndex});
@@ -293,12 +311,19 @@ io.on("connection", socket => {
     socket.data.room = code;
     socket.data.playerIndex = playerIndex;
 
-    // Vertel iedereen wie er bijgekomen is
     io.to(code).emit("playerJoined", {
       players: room.gameState.players,
       playerIndex
     });
     cb({playerIndex});
+  });
+
+  // ── Draw update doorsturen naar alle spelers ──
+  socket.on("drawUpdate", (data) => {
+    const code = socket.data.room;
+    if(!code) return;
+    // Broadcast naar alle anderen in de kamer
+    socket.to(code).emit("drawUpdate", data);
   });
 
   // ── Spel starten (alleen host) ──
@@ -623,15 +648,24 @@ io.on("connection", socket => {
     const code = socket.data.room;
     if(!code || !rooms[code]) return;
     const room = rooms[code];
-    room.players = room.players.filter(p=>p.socketId!==socket.id);
-    if(room.players.length===0){
-      delete rooms[code];
-      console.log(`Kamer ${code} verwijderd`);
+    const pi = socket.data.playerIndex;
+
+    // Als het spel in de lobby is, verwijder de speler volledig
+    if(room.gameState.phase === "LOBBY"){
+      room.players = room.players.filter(p=>p.socketId!==socket.id);
+      if(room.players.length===0){
+        delete rooms[code];
+        console.log(`Kamer ${code} verwijderd`);
+      } else {
+        io.to(code).emit("playerLeft", { playerIndex: pi, players: room.gameState.players });
+      }
     } else {
-      io.to(code).emit("playerLeft", {
-        playerIndex: socket.data.playerIndex,
-        players: room.gameState.players
-      });
+      // Spel bezig — bewaar de slot maar markeer als offline
+      // Zodat de speler kan herverbinden
+      const p = room.players.find(p=>p.socketId===socket.id);
+      if(p) p.socketId = null; // offline maar slot bewaard
+      console.log(`${room.gameState.players[pi]?.name} verbroken uit kamer ${code} — slot bewaard`);
+      io.to(code).emit("playerLeft", { playerIndex: pi, players: room.gameState.players });
     }
   });
 });
