@@ -318,12 +318,14 @@ io.on("connection", socket => {
     cb({playerIndex});
   });
 
-  // ── Draw update doorsturen naar alle spelers ──
+  // ── Draw update doorsturen naar ALLE spelers (inclusief host zelf) ──
   socket.on("drawUpdate", (data) => {
     const code = socket.data.room;
     if(!code) return;
-    // Broadcast naar alle anderen in de kamer
-    socket.to(code).emit("drawUpdate", data);
+    // Sla draw state op in kamer zodat herverbinders het ook zien
+    if(rooms[code]) rooms[code].drawState = data;
+    // Broadcast naar iedereen in de kamer (inclusief de host zelf)
+    io.to(code).emit("drawUpdate", data);
   });
 
   // ── Spel starten (alleen host) ──
