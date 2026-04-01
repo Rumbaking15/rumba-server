@@ -90,7 +90,6 @@ function canPlay(hand,card,trick,trump){
 
 // ─── Spelkamers ──────────────────────────────────────────────────────────────
 // rooms[code] = { players, gameState, ... }
-const rooms = {};
 
 function generateCode(){
   let code;
