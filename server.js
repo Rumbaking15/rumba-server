@@ -2,63 +2,36 @@
 // Node.js + Socket.io real-time game server
 // Elke speler verbindt met zijn eigen telefoon en ziet alleen zijn eigen kaarten
 
+// ─── Rumba Multiplayer Server ────────────────────────────────────────────────
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 app.get("/", (req, res) => res.send("Rumba server draait ✅"));
 
-// ─── Kamer persistentie ───────────────────────────────────────────────────────
-const ROOMS_FILE = path.join("/tmp", "rumba_rooms.json");
+// ─── Spelkamers in geheugen ───────────────────────────────────────────────────
+// rooms[code] = { players, gameState, createdAt }
+const rooms = {};
 
-function saveRooms(){
-  try{
-    // Sla alle socketIds op als null (verbindingen zijn weg na herstart)
-    const toSave={};
-    for(const code of Object.keys(rooms)){
-      const r=rooms[code];
-      // Alleen kamers opslaan waar het spel bezig is
-      if(r.gameState.phase!=="LOBBY" && r.gameState.phase!=="END_G"){
-        toSave[code]={
-          ...r,
-          players:r.players.map(p=>({...p,socketId:null})),
-          savedAt:Date.now(),
-        };
-      }
+// Ruim oude kamers op (ouder dan 6 uur) elk uur
+setInterval(()=>{
+  const now = Date.now();
+  for(const code of Object.keys(rooms)){
+    const r = rooms[code];
+    if(r.createdAt && now - r.createdAt > 6*60*60*1000){
+      delete rooms[code];
+      console.log(`Kamer ${code} opgeruimd na 6 uur`);
     }
-    fs.writeFileSync(ROOMS_FILE,JSON.stringify(toSave));
-  }catch(e){
-    console.log("Kon kamers niet opslaan:",e.message);
   }
-}
-
-function loadRooms(){
-  try{
-    if(!fs.existsSync(ROOMS_FILE)) return;
-    const data=JSON.parse(fs.readFileSync(ROOMS_FILE,"utf8"));
-    const now=Date.now();
-    for(const code of Object.keys(data)){
-      const r=data[code];
-      // Kamers ouder dan 4 uur niet laden
-      if(r.savedAt && now-r.savedAt > 4*60*60*1000) continue;
-      rooms[code]=r;
-      console.log(`Kamer ${code} hersteld uit opslag`);
-    }
-  }catch(e){
-    console.log("Kon kamers niet laden:",e.message);
-  }
-}
-
-// Laad kamers bij opstarten
-loadRooms();
+}, 60*60*1000);
 
 // ─── Spellogica (gedeeld met client) ─────────────────────────────────────────
 const SUITS  = ["K","H","R","S"];
@@ -137,8 +110,6 @@ function broadcastGameState(room){
     const state = buildStateForPlayer(r, p.playerIndex);
     socket.emit("gameState", state);
   });
-  // Sla kamers op na elke update
-  saveRooms();
 }
 
 function buildStateForPlayer(r, myIndex){
@@ -307,6 +278,7 @@ io.on("connection", socket => {
     const code = generateCode();
     rooms[code] = {
       code,
+      createdAt: Date.now(),
       players: [{name, socketId: socket.id, playerIndex: 0}],
       gameState: {
         phase: "LOBBY",
@@ -329,13 +301,17 @@ io.on("connection", socket => {
   socket.on("joinRoom", ({code, name}, cb) => {
     const room = rooms[code];
     if(!room){ cb({error:"Kamer niet gevonden"}); return; }
-    if(room.players.length>=6 && room.gameState.phase==="LOBBY"){ cb({error:"Kamer vol (max 6)"}); return; }
 
-    // Controleer of dit een herverbinding is (zelfde naam, spel al bezig)
+    // Controleer of dit een herverbinding is (zelfde naam al in het spel)
     const existingIdx = room.gameState.players.findIndex(p=>p.name===name);
-    if(existingIdx>=0 && room.gameState.phase!=="LOBBY"){
-      // Herverbinding — update socketId
-      room.players[existingIdx].socketId = socket.id;
+    if(existingIdx>=0){
+      // Herverbinding — update socketId en stuur huidige staat
+      if(room.players[existingIdx]){
+        room.players[existingIdx].socketId = socket.id;
+      } else {
+        // Speler slot bestaat niet meer — herstel het
+        room.players[existingIdx] = {name, socketId:socket.id, playerIndex:existingIdx};
+      }
       socket.join(code);
       socket.data.room = code;
       socket.data.playerIndex = existingIdx;
@@ -347,8 +323,12 @@ io.on("connection", socket => {
       return;
     }
 
-    // Nieuwe speler
-    if(room.gameState.phase !== "LOBBY"){ cb({error:"Spel al bezig — gebruik je naam om te herverbinden"}); return; }
+    // Nieuwe speler — alleen mogelijk in LOBBY fase
+    if(room.gameState.phase !== "LOBBY"){ 
+      cb({error:"Spel al bezig — verbind opnieuw met je naam om terug te keren"}); 
+      return; 
+    }
+    if(room.players.length>=6){ cb({error:"Kamer vol (max 6)"}); return; }
 
     const playerIndex = room.players.length;
     room.players.push({name, socketId:socket.id, playerIndex});
