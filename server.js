@@ -5,6 +5,8 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -13,6 +15,50 @@ const io = new Server(httpServer, {
 });
 
 app.get("/", (req, res) => res.send("Rumba server draait ✅"));
+
+// ─── Kamer persistentie ───────────────────────────────────────────────────────
+const ROOMS_FILE = path.join("/tmp", "rumba_rooms.json");
+
+function saveRooms(){
+  try{
+    // Sla alle socketIds op als null (verbindingen zijn weg na herstart)
+    const toSave={};
+    for(const code of Object.keys(rooms)){
+      const r=rooms[code];
+      // Alleen kamers opslaan waar het spel bezig is
+      if(r.gameState.phase!=="LOBBY" && r.gameState.phase!=="END_G"){
+        toSave[code]={
+          ...r,
+          players:r.players.map(p=>({...p,socketId:null})),
+          savedAt:Date.now(),
+        };
+      }
+    }
+    fs.writeFileSync(ROOMS_FILE,JSON.stringify(toSave));
+  }catch(e){
+    console.log("Kon kamers niet opslaan:",e.message);
+  }
+}
+
+function loadRooms(){
+  try{
+    if(!fs.existsSync(ROOMS_FILE)) return;
+    const data=JSON.parse(fs.readFileSync(ROOMS_FILE,"utf8"));
+    const now=Date.now();
+    for(const code of Object.keys(data)){
+      const r=data[code];
+      // Kamers ouder dan 4 uur niet laden
+      if(r.savedAt && now-r.savedAt > 4*60*60*1000) continue;
+      rooms[code]=r;
+      console.log(`Kamer ${code} hersteld uit opslag`);
+    }
+  }catch(e){
+    console.log("Kon kamers niet laden:",e.message);
+  }
+}
+
+// Laad kamers bij opstarten
+loadRooms();
 
 // ─── Spellogica (gedeeld met client) ─────────────────────────────────────────
 const SUITS  = ["K","H","R","S"];
@@ -85,12 +131,14 @@ function broadcastGameState(room){
   const r = rooms[room];
   if(!r) return;
   r.players.forEach(p => {
-    if(!p.socketId) return; // speler offline, sla over
+    if(!p.socketId) return;
     const socket = io.sockets.sockets.get(p.socketId);
     if(!socket) return;
     const state = buildStateForPlayer(r, p.playerIndex);
     socket.emit("gameState", state);
   });
+  // Sla kamers op na elke update
+  saveRooms();
 }
 
 function buildStateForPlayer(r, myIndex){
