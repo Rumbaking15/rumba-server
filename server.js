@@ -467,8 +467,33 @@ io.on("connection", socket => {
     if(call){
       g.rumbaWho = pi;
       addLog(g,`🎺 ${g.players[pi].name} roept RUMBA!`);
-      g.curPlayer = pi;
-      g.phase = "PLAY";
+      // Check of iemand de 2-van-troef heeft — die mag nog wisselen
+      // Bouw exchQueue met alle actieve spelers
+      const actPlayers = g.bids.map((b,i)=>b==="in"?i:-1).filter(i=>i>=0);
+      const twoHolders = actPlayers.filter(idx =>
+        g.trumpCard.v !== "V" &&
+        !g.twoSwapped &&
+        g.hands[idx].some(c=>c.v==="2"&&c.s===g.trumpSuit)
+      );
+      if(twoHolders.length > 0){
+        // Stel exchQueue in met enkel de spelers die de 2-van-troef hebben
+        // in de juiste volgorde (wijzerzin vanaf dealer)
+        const n2 = g.players.length;
+        const q = [];
+        for(let i=1;i<=n2;i++){
+          const idx=(g.dealerIndex+i)%n2;
+          if(twoHolders.includes(idx)) q.push(idx);
+        }
+        g.exchQueue = q;
+        g.exchIndex = 0;
+        g.normalExchDone = false;
+        g.twoSwapped = false;
+        g.twoOff = true; // eerste speler in queue heeft de 2-van-troef
+        g.phase = "EXCH";
+      } else {
+        g.curPlayer = pi;
+        g.phase = "PLAY";
+      }
     } else {
       addLog(g,`${g.players[pi].name}: geen rumba`);
       const nq = g.rumbaQ+1;
@@ -519,47 +544,38 @@ io.on("connection", socket => {
     const pi = g.exchQueue[g.exchIndex];
     if(socket.data.playerIndex !== pi) return;
 
+    let hand = g.hands[pi];
     let drawn = [];
-    if(selectedIds && selectedIds.length > 0){
-      // Speler wisselt kaarten
-      const kept = g.hands[pi].filter(c => !selectedIds.includes(c.id));
+    if(selectedIds && selectedIds.length>0){
+      const kept = hand.filter(c=>!selectedIds.includes(c.id));
       drawn = g.stockPile.slice(0, selectedIds.length);
       g.stockPile = g.stockPile.slice(selectedIds.length);
-      g.hands[pi] = [...kept, ...drawn];
-      addLog(g, `${g.players[pi].name} wisselt ${selectedIds.length} kaart(en).`);
+      hand = [...kept, ...drawn];
+      g.hands[pi] = hand;
+      addLog(g,`${g.players[pi].name} wisselt ${selectedIds.length} kaart(en).`);
     } else {
-      // Speler wisselt niets — log en ga meteen door
-      addLog(g, `${g.players[pi].name}: wisselt niets.`);
+      addLog(g,`${g.players[pi].name}: wisselt niets.`);
     }
 
     g.normalExchDone = true;
 
-    if(drawn.length > 0){
-      // Nieuwe kaarten ontvangen — check of 2 van troef erbij zit
-      const got2Trump = !g.twoSwapped &&
-        g.trumpCard.v !== "V" &&
-        drawn.some(c => c.v === "2" && c.s === g.trumpSuit);
+    // Stuur nieuwe kaarten naar deze speler
+    if(drawn.length>0){
+      g.newCards = {forPlayer:pi, cards:drawn};
+      g.showNewCards = {forPlayer:pi, show:true};
+    }
 
-      if(got2Trump){
-        // Toon nieuwe kaarten eerst, daarna 2-van-troef aanbod
-        g.newCards = {forPlayer: pi, cards: drawn};
-        g.showNewCards = {forPlayer: pi, show: true};
-        g.pendingTwoOff = true;
-      } else {
-        // Toon nieuwe kaarten, daarna direct door
-        g.newCards = {forPlayer: pi, cards: drawn};
-        g.showNewCards = {forPlayer: pi, show: true};
-        g.pendingTwoOff = false;
-      }
-    } else {
-      // Niets gewisseld — check of twoOff nog actief is
-      if(g.twoOff){
-        // twoOff vraag komt nog — wacht op twoSwap event
-        // (normalExchDone is nu true, twoSwap zal advanceExchServer aanroepen)
-      } else {
-        // Niets te doen — ga meteen door naar volgende speler
-        advanceExchServer(g);
-      }
+    // Check 2 van troef in nieuwe kaarten (alleen als nog niet gewisseld)
+    const got2Trump = !g.twoSwapped &&
+      g.trumpCard.v!=="V" &&
+      drawn.some(c=>c.v==="2"&&c.s===g.trumpSuit);
+
+    if(got2Trump && drawn.length>0){
+      // Toon nieuwe kaarten eerst, daarna 2-van-troef aanbod via "newCardsSeen"
+      g.twoOff = false; // wordt true na newCardsSeen
+      g.pendingTwoOff = true;
+    } else if(!got2Trump){
+      g.pendingTwoOff = false;
     }
 
     broadcastGameState(code);
@@ -594,12 +610,15 @@ io.on("connection", socket => {
     g.newCards = null;
     const ni = g.exchIndex+1;
     if(ni >= g.exchQueue.length){
-      g.curPlayer = firstActivePlayer(g);
+      // Als Rumba geroepen is, begint de Rumba-roeper
+      g.curPlayer = g.rumbaWho >= 0 ? g.rumbaWho : firstActivePlayer(g);
       g.phase = "PLAY";
     } else {
       g.exchIndex = ni;
       const nextPi = g.exchQueue[ni];
+      // Alleen twoOff als deze speler de 2-van-troef heeft
       g.twoOff = g.trumpCard.v!=="V" &&
+        !g.twoSwapped &&
         g.hands[nextPi].some(c=>c.v==="2"&&c.s===g.trumpSuit);
     }
   }
