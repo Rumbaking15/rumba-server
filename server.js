@@ -17,11 +17,8 @@ const io = new Server(httpServer, {
 
 app.get("/", (req, res) => res.send("Rumba server draait ✅"));
 
-// ─── Spelkamers in geheugen ───────────────────────────────────────────────────
-// rooms[code] = { players, gameState, createdAt }
 const rooms = {};
 
-// Ruim oude kamers op (ouder dan 6 uur) elk uur
 setInterval(()=>{
   const now = Date.now();
   for(const code of Object.keys(rooms)){
@@ -33,7 +30,6 @@ setInterval(()=>{
   }
 }, 60*60*1000);
 
-// ─── Spellogica (gedeeld met client) ─────────────────────────────────────────
 const SUITS  = ["K","H","R","S"];
 const VALUES = ["2","3","4","5","6","7","8","9","10","V","D","Ri","1"];
 const RANK   = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"V":11,"D":12,"Ri":13,"1":14};
@@ -88,9 +84,6 @@ function canPlay(hand,card,trick,trump){
   return true;
 }
 
-// ─── Spelkamers ──────────────────────────────────────────────────────────────
-// rooms[code] = { players, gameState, ... }
-
 function generateCode(){
   let code;
   do { code = Math.floor(1000+Math.random()*9000).toString(); }
@@ -98,7 +91,6 @@ function generateCode(){
   return code;
 }
 
-// Stuur aan elke speler alleen zijn eigen kaarten
 function broadcastGameState(room){
   const r = rooms[room];
   if(!r) return;
@@ -114,25 +106,19 @@ function broadcastGameState(room){
 function buildStateForPlayer(r, myIndex){
   const g = r.gameState;
   return {
-    // Spelerinfo
     myIndex,
     myHand: g.hands ? g.hands[myIndex] : [],
     players: g.players,
     dealerIndex: g.dealerIndex,
     round: g.round,
-    // Troef
     trumpCard: g.trumpCard,
     trumpSuit: g.trumpSuit,
-    // Fase
     phase: g.phase,
-    // Bieden
     bids: g.bids,
     bidder: g.bidder,
-    // Rumba
     active: g.active,
     rumbaQ: g.rumbaQ,
     rumbaWho: g.rumbaWho,
-    // Wissel
     exchQueue: g.exchQueue,
     exchIndex: g.exchIndex,
     twoOff: g.twoOff,
@@ -140,18 +126,14 @@ function buildStateForPlayer(r, myIndex){
     normalExchDone: g.normalExchDone,
     newCards: g.newCards && g.newCards.forPlayer === myIndex ? g.newCards.cards : [],
     showNewCards: g.showNewCards && g.showNewCards.forPlayer === myIndex ? g.showNewCards.show : false,
-    // Spelen
     trick: g.trick,
     curPlayer: g.curPlayer,
     tricksWon: g.tricksWon,
     trickCount: g.trickCount,
-    // Score
     scores: g.scores,
     scoreHistory: g.scoreHistory,
     consecPasses: g.consecPasses,
-    // Log
     log: g.log ? g.log.slice(0,20) : [],
-    // Boer van troef melding
     boerAnnounced: g.boerAnnounced,
   };
 }
@@ -162,7 +144,6 @@ function addLog(g, msg){
   if(g.log.length>50) g.log.pop();
 }
 
-// ─── Nieuwe ronde starten ────────────────────────────────────────────────────
 function startNewRound(g){
   const deck = createDeck();
   const n = g.players.length;
@@ -187,6 +168,7 @@ function startNewRound(g){
   g.exchQueue = [];
   g.exchIndex = 0;
   g.boerAnnounced = false;
+  g.rumbaExchMode = false; // nieuw: geeft aan dat we in Rumba-wissel modus zijn
   addLog(g,`── Ronde ${g.round} · Deler: ${g.players[g.dealerIndex].name}`);
 
   if(g.trumpCard.v === "V"){
@@ -206,7 +188,6 @@ function startNewRound(g){
   }
 }
 
-// ─── Scoring ─────────────────────────────────────────────────────────────────
 function resolveRound(g){
   const rWho = g.rumbaWho;
   const ft = g.tricksWon;
@@ -235,7 +216,6 @@ function resolveRound(g){
   g.phase = np.some(p=>p.score<=0) ? "END_G" : "END_R";
 }
 
-// ─── Wisselwachtrij opbouwen ──────────────────────────────────────────────────
 function buildExchQueue(g){
   const n = g.players.length;
   const act = g.bids.map((b,i)=>b==="in"?i:-1).filter(i=>i>=0);
@@ -248,6 +228,7 @@ function buildExchQueue(g){
   g.exchIndex = 0;
   g.twoSwapped = false;
   g.normalExchDone = false;
+  g.rumbaExchMode = false;
   g.twoOff = g.trumpCard.v!=="V" && g.hands[q[0]].some(c=>c.v==="2"&&c.s===g.trumpSuit);
   g.phase = "EXCH";
 }
@@ -268,11 +249,36 @@ function isForced(g, playerIndex){
   return false;
 }
 
-// ─── Socket.io events ────────────────────────────────────────────────────────
+// Ga naar volgende speler in exchQueue, of naar PLAY als iedereen klaar is
+function advanceExchServer(g){
+  g.twoSwapped = false;
+  g.normalExchDone = false;
+  g.twoOff = false;
+  g.newCards = null;
+  const ni = g.exchIndex+1;
+  if(ni >= g.exchQueue.length){
+    // Klaar met wisselen — naar PLAY
+    g.curPlayer = g.rumbaWho >= 0 ? g.rumbaWho : firstActivePlayer(g);
+    g.phase = "PLAY";
+    g.rumbaExchMode = false;
+  } else {
+    g.exchIndex = ni;
+    const nextPi = g.exchQueue[ni];
+    if(g.rumbaExchMode){
+      // In Rumba-modus: altijd twoOff voor de volgende in de queue
+      // (want de queue bevat enkel spelers met de 2-van-troef)
+      g.twoOff = true;
+    } else {
+      g.twoOff = g.trumpCard.v!=="V" &&
+        !g.twoSwapped &&
+        g.hands[nextPi].some(c=>c.v==="2"&&c.s===g.trumpSuit);
+    }
+  }
+}
+
 io.on("connection", socket => {
   console.log("Verbonden:", socket.id);
 
-  // ── Kamer aanmaken ──
   socket.on("createRoom", ({name}, cb) => {
     const code = generateCode();
     rooms[code] = {
@@ -296,36 +302,32 @@ io.on("connection", socket => {
     cb({code, playerIndex:0});
   });
 
-  // ── Kamer vervoegen of herverbinden ──
   socket.on("joinRoom", ({code, name}, cb) => {
     const room = rooms[code];
     if(!room){ cb({error:"Kamer niet gevonden"}); return; }
 
-    // Controleer of dit een herverbinding is (zelfde naam al in het spel)
     const existingIdx = room.gameState.players.findIndex(p=>p.name===name);
     if(existingIdx>=0){
-      // Herverbinding — update socketId en stuur huidige staat
       if(room.players[existingIdx]){
         room.players[existingIdx].socketId = socket.id;
       } else {
-        // Speler slot bestaat niet meer — herstel het
         room.players[existingIdx] = {name, socketId:socket.id, playerIndex:existingIdx};
       }
       socket.join(code);
       socket.data.room = code;
       socket.data.playerIndex = existingIdx;
       console.log(`${name} herverbonden met kamer ${code} als speler ${existingIdx}`);
-      // Stuur meteen de huidige spelstatus
-      const state = buildStateForPlayer(room, existingIdx);
-      socket.emit("gameState", state);
       cb({playerIndex: existingIdx, reconnected: true});
+      setTimeout(()=>{
+        const state = buildStateForPlayer(room, existingIdx);
+        socket.emit("gameState", state);
+      }, 100);
       return;
     }
 
-    // Nieuwe speler — alleen mogelijk in LOBBY fase
-    if(room.gameState.phase !== "LOBBY"){ 
-      cb({error:"Spel al bezig — verbind opnieuw met je naam om terug te keren"}); 
-      return; 
+    if(room.gameState.phase !== "LOBBY"){
+      cb({error:"Spel al bezig — verbind opnieuw met je naam om terug te keren"});
+      return;
     }
     if(room.players.length>=6){ cb({error:"Kamer vol (max 6)"}); return; }
 
@@ -338,39 +340,28 @@ io.on("connection", socket => {
     socket.data.room = code;
     socket.data.playerIndex = playerIndex;
 
-    io.to(code).emit("playerJoined", {
-      players: room.gameState.players,
-      playerIndex
-    });
+    io.to(code).emit("playerJoined", {players: room.gameState.players, playerIndex});
     cb({playerIndex});
   });
 
-  // ── Draw update doorsturen naar ALLE spelers (inclusief host zelf) ──
   socket.on("drawUpdate", (data) => {
     const code = socket.data.room;
     if(!code) return;
-    // Sla draw state op in kamer zodat herverbinders het ook zien
     if(rooms[code]) rooms[code].drawState = data;
-    // Broadcast naar iedereen in de kamer (inclusief de host zelf)
     io.to(code).emit("drawUpdate", data);
   });
 
-  // ── Spel starten (alleen host) ──
   socket.on("startGame", () => {
     const code = socket.data.room;
     const room = rooms[code];
     if(!room || socket.data.playerIndex !== 0) return;
-    if(room.players.length < 2){ 
-      socket.emit("error", "Minimum 2 spelers nodig"); 
-      return; 
-    }
+    if(room.players.length < 2){ socket.emit("error", "Minimum 2 spelers nodig"); return; }
     const g = room.gameState;
     g.round = 1;
     startNewRound(g);
     broadcastGameState(code);
   });
 
-  // ── Boer van troef bevestigd ──
   socket.on("boerConfirmed", () => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -381,7 +372,6 @@ io.on("connection", socket => {
     broadcastGameState(code);
   });
 
-  // ── Bieden ──
   socket.on("bid", ({bid}) => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -404,7 +394,6 @@ io.on("connection", socket => {
     const inNow = nb.filter(b=>b==="in").length;
     const stillOpen = nb.filter(b=>b===undefined).length;
 
-    // Forceer resterende spelers als min-2 bereikt wordt
     if(inNow+stillOpen<=1 && stillOpen>0){
       const forced=[...nb];
       const cp2=[...cp];
@@ -445,7 +434,6 @@ io.on("connection", socket => {
     broadcastGameState(code);
   });
 
-  // ── Rumba ──
   socket.on("rumba", ({call}) => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -453,7 +441,6 @@ io.on("connection", socket => {
     const g = room.gameState;
     if(g.phase !== "RUMBA") return;
 
-    // Bepaal volgorde actieve spelers
     const n=g.players.length;
     const ord=[];
     const s=(g.dealerIndex+1)%n;
@@ -467,29 +454,30 @@ io.on("connection", socket => {
     if(call){
       g.rumbaWho = pi;
       addLog(g,`🎺 ${g.players[pi].name} roept RUMBA!`);
-      // Check of iemand de 2-van-troef heeft — die mag nog wisselen
-      // Bouw exchQueue met alle actieve spelers
+
+      // Zoek alle actieve spelers die de 2-van-troef hebben
       const actPlayers = g.bids.map((b,i)=>b==="in"?i:-1).filter(i=>i>=0);
       const twoHolders = actPlayers.filter(idx =>
         g.trumpCard.v !== "V" &&
         !g.twoSwapped &&
         g.hands[idx].some(c=>c.v==="2"&&c.s===g.trumpSuit)
       );
+
       if(twoHolders.length > 0){
-        // Stel exchQueue in met enkel de spelers die de 2-van-troef hebben
-        // in de juiste volgorde (wijzerzin vanaf dealer)
-        const n2 = g.players.length;
+        // Bouw exchQueue enkel met spelers die de 2-van-troef hebben
         const q = [];
-        for(let i=1;i<=n2;i++){
-          const idx=(g.dealerIndex+i)%n2;
+        for(let i=1;i<=n;i++){
+          const idx=(g.dealerIndex+i)%n;
           if(twoHolders.includes(idx)) q.push(idx);
         }
         g.exchQueue = q;
         g.exchIndex = 0;
-        g.normalExchDone = false;
+        g.normalExchDone = true; // in rumbaExchMode: sla confirmExch over
         g.twoSwapped = false;
-        g.twoOff = true; // eerste speler in queue heeft de 2-van-troef
+        g.twoOff = true;
+        g.rumbaExchMode = true; // markeer als Rumba-wissel modus
         g.phase = "EXCH";
+        addLog(g, `2 van troef wissel mogelijk voor: ${twoHolders.map(i=>g.players[i].name).join(", ")}`);
       } else {
         g.curPlayer = pi;
         g.phase = "PLAY";
@@ -506,7 +494,6 @@ io.on("connection", socket => {
     broadcastGameState(code);
   });
 
-  // ── 2 van troef wisselen ──
   socket.on("twoSwap", ({yes}) => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -518,7 +505,10 @@ io.on("connection", socket => {
 
     if(!yes){
       g.twoOff = false;
-      if(g.normalExchDone) advanceExchServer(g);
+      // In rumbaExchMode: normalExchDone is al true, dus gewoon doorgaan
+      if(g.rumbaExchMode || g.normalExchDone){
+        advanceExchServer(g);
+      }
     } else {
       const two = g.hands[pi].find(c=>c.v==="2"&&c.s===g.trumpSuit);
       const received = g.trumpCard;
@@ -527,14 +517,14 @@ io.on("connection", socket => {
       addLog(g,`${g.players[pi].name} wisselt 2 voor troefkaart.`);
       g.twoOff = false;
       g.twoSwapped = true;
-      if(g.normalExchDone){
+      // In rumbaExchMode of normalExchDone: ga door
+      if(g.rumbaExchMode || g.normalExchDone){
         advanceExchServer(g);
       }
     }
     broadcastGameState(code);
   });
 
-  // ── Kaarten wisselen bevestigen ──
   socket.on("confirmExch", ({selectedIds}) => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -544,44 +534,48 @@ io.on("connection", socket => {
     const pi = g.exchQueue[g.exchIndex];
     if(socket.data.playerIndex !== pi) return;
 
-    let hand = g.hands[pi];
+    // In rumbaExchMode wordt confirmExch niet gebruikt (enkel twoSwap)
+    if(g.rumbaExchMode) return;
+
     let drawn = [];
-    if(selectedIds && selectedIds.length>0){
-      const kept = hand.filter(c=>!selectedIds.includes(c.id));
+    if(selectedIds && selectedIds.length > 0){
+      const kept = g.hands[pi].filter(c => !selectedIds.includes(c.id));
       drawn = g.stockPile.slice(0, selectedIds.length);
       g.stockPile = g.stockPile.slice(selectedIds.length);
-      hand = [...kept, ...drawn];
-      g.hands[pi] = hand;
-      addLog(g,`${g.players[pi].name} wisselt ${selectedIds.length} kaart(en).`);
+      g.hands[pi] = [...kept, ...drawn];
+      addLog(g, `${g.players[pi].name} wisselt ${selectedIds.length} kaart(en).`);
     } else {
-      addLog(g,`${g.players[pi].name}: wisselt niets.`);
+      addLog(g, `${g.players[pi].name}: wisselt niets.`);
     }
 
     g.normalExchDone = true;
 
-    // Stuur nieuwe kaarten naar deze speler
-    if(drawn.length>0){
-      g.newCards = {forPlayer:pi, cards:drawn};
-      g.showNewCards = {forPlayer:pi, show:true};
-    }
+    if(drawn.length > 0){
+      const got2Trump = !g.twoSwapped &&
+        g.trumpCard.v !== "V" &&
+        drawn.some(c => c.v === "2" && c.s === g.trumpSuit);
 
-    // Check 2 van troef in nieuwe kaarten (alleen als nog niet gewisseld)
-    const got2Trump = !g.twoSwapped &&
-      g.trumpCard.v!=="V" &&
-      drawn.some(c=>c.v==="2"&&c.s===g.trumpSuit);
-
-    if(got2Trump && drawn.length>0){
-      // Toon nieuwe kaarten eerst, daarna 2-van-troef aanbod via "newCardsSeen"
-      g.twoOff = false; // wordt true na newCardsSeen
-      g.pendingTwoOff = true;
-    } else if(!got2Trump){
-      g.pendingTwoOff = false;
+      if(got2Trump){
+        g.newCards = {forPlayer: pi, cards: drawn};
+        g.showNewCards = {forPlayer: pi, show: true};
+        g.pendingTwoOff = true;
+      } else {
+        g.newCards = {forPlayer: pi, cards: drawn};
+        g.showNewCards = {forPlayer: pi, show: true};
+        g.pendingTwoOff = false;
+      }
+    } else {
+      // Niets gewisseld
+      if(g.twoOff){
+        // twoOff vraag komt nog — wacht op twoSwap
+      } else {
+        advanceExchServer(g);
+      }
     }
 
     broadcastGameState(code);
   });
 
-  // ── Nieuwe kaarten gezien ("Doorgaan" gedrukt) ──
   socket.on("newCardsSeen", () => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -603,27 +597,6 @@ io.on("connection", socket => {
     broadcastGameState(code);
   });
 
-  function advanceExchServer(g){
-    g.twoSwapped = false;
-    g.normalExchDone = false;
-    g.twoOff = false;
-    g.newCards = null;
-    const ni = g.exchIndex+1;
-    if(ni >= g.exchQueue.length){
-      // Als Rumba geroepen is, begint de Rumba-roeper
-      g.curPlayer = g.rumbaWho >= 0 ? g.rumbaWho : firstActivePlayer(g);
-      g.phase = "PLAY";
-    } else {
-      g.exchIndex = ni;
-      const nextPi = g.exchQueue[ni];
-      // Alleen twoOff als deze speler de 2-van-troef heeft
-      g.twoOff = g.trumpCard.v!=="V" &&
-        !g.twoSwapped &&
-        g.hands[nextPi].some(c=>c.v==="2"&&c.s===g.trumpSuit);
-    }
-  }
-
-  // ── Kaart spelen ──
   socket.on("playCard", ({cardId}) => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -636,7 +609,6 @@ io.on("connection", socket => {
     const card = g.hands[pi].find(c=>c.id===cardId);
     if(!card) return;
 
-    // Valideer de kaart
     const act = g.bids.map((b,i)=>(b==="in"||i===g.rumbaWho)?i:-1).filter(i=>i>=0);
     if(!canPlay(g.hands[pi], card, g.trick, g.trumpSuit)) return;
 
@@ -645,14 +617,11 @@ io.on("connection", socket => {
     addLog(g,`${g.players[pi].name} speelt ${card.v}${card.s}`);
 
     if(g.trick.length === act.length){
-      // Slag afgehandeld
       const w = trickWinner(g.trick, g.trumpSuit);
       g.tricksWon[w]++;
       g.trickCount++;
       addLog(g,`→ ${g.players[w].name} wint slag ${g.trickCount}!`);
 
-      // Broadcast de tussentijdse staat (kaarten nog zichtbaar op tafel)
-      // Maar alleen als het NIET de laatste slag is — anders tonen we even slag 6/5
       if(g.trickCount < 5){
         broadcastGameState(code);
       }
@@ -675,19 +644,17 @@ io.on("connection", socket => {
     broadcastGameState(code);
   });
 
-  // ── Volgende ronde ──
   socket.on("nextRound", () => {
     const code = socket.data.room;
     const room = rooms[code];
     if(!room) return;
     const g = room.gameState;
     if(g.phase !== "END_R") return;
-    if(socket.data.playerIndex !== 0) return; // alleen host
+    if(socket.data.playerIndex !== 0) return;
     startNewRound(g);
     broadcastGameState(code);
   });
 
-  // ── Nieuw spel ──
   socket.on("newGame", () => {
     const code = socket.data.room;
     const room = rooms[code];
@@ -704,14 +671,12 @@ io.on("connection", socket => {
     broadcastGameState(code);
   });
 
-  // ── Disconnect ──
   socket.on("disconnect", () => {
     const code = socket.data.room;
     if(!code || !rooms[code]) return;
     const room = rooms[code];
     const pi = socket.data.playerIndex;
 
-    // Als het spel in de lobby is, verwijder de speler volledig
     if(room.gameState.phase === "LOBBY"){
       room.players = room.players.filter(p=>p.socketId!==socket.id);
       if(room.players.length===0){
@@ -721,12 +686,15 @@ io.on("connection", socket => {
         io.to(code).emit("playerLeft", { playerIndex: pi, players: room.gameState.players });
       }
     } else {
-      // Spel bezig — bewaar de slot maar markeer als offline
-      // Zodat de speler kan herverbinden
       const p = room.players.find(p=>p.socketId===socket.id);
-      if(p) p.socketId = null; // offline maar slot bewaard
-      console.log(`${room.gameState.players[pi]?.name} verbroken uit kamer ${code} — slot bewaard`);
-      io.to(code).emit("playerLeft", { playerIndex: pi, players: room.gameState.players });
+      if(p) p.socketId = null;
+      const playerName = room.gameState.players[pi]?.name || `Speler ${pi+1}`;
+      console.log(`${playerName} verbroken uit kamer ${code} — slot bewaard`);
+      io.to(code).emit("playerLeft", {
+        playerIndex: pi,
+        players: room.gameState.players,
+        name: playerName
+      });
     }
   });
 });
