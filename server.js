@@ -241,11 +241,22 @@ function firstActivePlayer(g){
 }
 
 function isForced(g, playerIndex){
+  // Regel 1: score ≤ 3 → altijd verplicht
   if(g.players[playerIndex].score<=3) return true;
+  // Regel 2: al 2x na elkaar gepast → verplicht
   if(g.consecPasses[playerIndex]>=2) return true;
-  const inNow=g.bids.filter(b=>b==="in").length;
-  const openExcl=g.bids.filter((b,bi)=>b===undefined&&bi!==playerIndex).length;
-  if(inNow+openExcl<2) return true;
+  // Regel 3: min 2 spelers moeten spelen
+  // Kijk kloksgewijs: spelers NA mij die verplicht zijn (spelen sowieso mee)
+  const n = g.players.length;
+  const alIn = g.bids.filter(b=>b==="in").length;
+  let verplichtNaMij = 0;
+  for(let i=1;i<n;i++){
+    const idx=(playerIndex+i)%n;
+    if(g.bids[idx]!==undefined) continue; // al geboden
+    if(g.players[idx].score<=3 || g.consecPasses[idx]>=2) verplichtNaMij++;
+  }
+  // Als ik pas: zijn er dan nog genoeg zekere spelers?
+  if(alIn + verplichtNaMij < 2) return true;
   return false;
 }
 
