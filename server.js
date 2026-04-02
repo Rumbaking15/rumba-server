@@ -519,38 +519,47 @@ io.on("connection", socket => {
     const pi = g.exchQueue[g.exchIndex];
     if(socket.data.playerIndex !== pi) return;
 
-    let hand = g.hands[pi];
     let drawn = [];
-    if(selectedIds && selectedIds.length>0){
-      const kept = hand.filter(c=>!selectedIds.includes(c.id));
+    if(selectedIds && selectedIds.length > 0){
+      // Speler wisselt kaarten
+      const kept = g.hands[pi].filter(c => !selectedIds.includes(c.id));
       drawn = g.stockPile.slice(0, selectedIds.length);
       g.stockPile = g.stockPile.slice(selectedIds.length);
-      hand = [...kept, ...drawn];
-      g.hands[pi] = hand;
-      addLog(g,`${g.players[pi].name} wisselt ${selectedIds.length} kaart(en).`);
+      g.hands[pi] = [...kept, ...drawn];
+      addLog(g, `${g.players[pi].name} wisselt ${selectedIds.length} kaart(en).`);
     } else {
-      addLog(g,`${g.players[pi].name}: wisselt niets.`);
+      // Speler wisselt niets — log en ga meteen door
+      addLog(g, `${g.players[pi].name}: wisselt niets.`);
     }
 
     g.normalExchDone = true;
 
-    // Stuur nieuwe kaarten naar deze speler
-    if(drawn.length>0){
-      g.newCards = {forPlayer:pi, cards:drawn};
-      g.showNewCards = {forPlayer:pi, show:true};
-    }
+    if(drawn.length > 0){
+      // Nieuwe kaarten ontvangen — check of 2 van troef erbij zit
+      const got2Trump = !g.twoSwapped &&
+        g.trumpCard.v !== "V" &&
+        drawn.some(c => c.v === "2" && c.s === g.trumpSuit);
 
-    // Check 2 van troef in nieuwe kaarten (alleen als nog niet gewisseld)
-    const got2Trump = !g.twoSwapped &&
-      g.trumpCard.v!=="V" &&
-      drawn.some(c=>c.v==="2"&&c.s===g.trumpSuit);
-
-    if(got2Trump && drawn.length>0){
-      // Toon nieuwe kaarten eerst, daarna 2-van-troef aanbod via "newCardsSeen"
-      g.twoOff = false; // wordt true na newCardsSeen
-      g.pendingTwoOff = true;
-    } else if(!got2Trump){
-      g.pendingTwoOff = false;
+      if(got2Trump){
+        // Toon nieuwe kaarten eerst, daarna 2-van-troef aanbod
+        g.newCards = {forPlayer: pi, cards: drawn};
+        g.showNewCards = {forPlayer: pi, show: true};
+        g.pendingTwoOff = true;
+      } else {
+        // Toon nieuwe kaarten, daarna direct door
+        g.newCards = {forPlayer: pi, cards: drawn};
+        g.showNewCards = {forPlayer: pi, show: true};
+        g.pendingTwoOff = false;
+      }
+    } else {
+      // Niets gewisseld — check of twoOff nog actief is
+      if(g.twoOff){
+        // twoOff vraag komt nog — wacht op twoSwap event
+        // (normalExchDone is nu true, twoSwap zal advanceExchServer aanroepen)
+      } else {
+        // Niets te doen — ga meteen door naar volgende speler
+        advanceExchServer(g);
+      }
     }
 
     broadcastGameState(code);
